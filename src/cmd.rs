@@ -2,6 +2,8 @@ use std::{
     io::ErrorKind,
     process::{Command, Output},
 };
+
+#[derive(Debug, Clone)]
 pub struct SshCmd {
     user: String,
     target: String,
@@ -23,7 +25,12 @@ impl SshCmd {
             cmd,
         }
     }
+
     pub fn get_cmd(&self) -> String {
+        return self.cmd.clone();
+    }
+
+    fn get_full_cmd(&self) -> String {
         format!(
             "ssh {} {}@{} -- {}",
             self.options, self.user, self.target, self.cmd
@@ -31,7 +38,7 @@ impl SshCmd {
     }
 
     pub fn get_output(&self) -> Result<Output, std::io::Error> {
-        let raw_cmd = self.get_cmd();
+        let raw_cmd = self.get_full_cmd();
         let mut parts = raw_cmd.split_whitespace();
         let cmd = parts
             .next()
