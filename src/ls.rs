@@ -49,18 +49,12 @@ fn parse_long_list_line(line: &str) -> Option<FileMeta> {
         _ => false,
     };
 
-    let perms_str = format!(
-        "{}{}{}",
-        permissions_octet(&mut chars),
-        permissions_octet(&mut chars),
-        permissions_octet(&mut chars)
-    );
+    let perms = 0u16
+        + (permissions_octet(&mut chars) << 6)
+        + (permissions_octet(&mut chars) << 3)
+        + permissions_octet(&mut chars);
 
-    let perms = if !is_link {
-        i64::from_str_radix(&perms_str, 16).unwrap() as u16
-    } else {
-        0o7777
-    };
+    let perms = if !is_link { perms } else { 0o7777 };
 
     let name = if is_link {
         rest.split(" -> ").next().unwrap().to_string()
@@ -218,12 +212,18 @@ fn test_perms() {
     ";
 
     let dir = parse_long_list(sample);
-
     assert_eq!(dir.len(), 1);
 
     let file = &dir[0];
 
     assert_eq!("drwxr-xr-x", file.permissions);
-    // this may be wrong, needs checking!
-    assert_eq!(1877, file.perms);
+
+    // format is tttt|ugs|rwxrwxrwx
+    // where tttt = 1000 regular file,  0100 dir, device, fifo...
+    // ugs = special file usage
+    let bytes: u16 = 0b000_111_101_101;
+    let oct: u16 = 0o0755;
+
+    assert_eq!(bytes, oct);
+    assert_eq!(bytes, file.perms);
 }
