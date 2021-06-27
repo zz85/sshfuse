@@ -1,10 +1,5 @@
 use argh::FromArgs;
-use std::{
-    path::PathBuf,
-    sync::mpsc::{self, TryRecvError},
-    thread,
-    time::Duration,
-};
+use std::{path::PathBuf, thread};
 
 use console::style;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -44,31 +39,8 @@ fn cmd_view(cmd_runner: SshCmd, pb: ProgressBar, cmd: String) {
     );
 
     let cmd_fmt = style(cmd.clone()).dim().bold();
-    let cmd_fmt2 = cmd_fmt.clone();
     pb.set_message(format!("Running ssh command {}...", cmd_fmt));
-
-    let (tx, rx) = mpsc::channel();
-
-    let pb2 = pb.clone();
-    let spinner_thread = thread::spawn(move || {
-        loop {
-            match rx.try_recv() {
-                Ok(()) => {
-                    break;
-                }
-                Err(TryRecvError::Empty) => {}
-                Err(TryRecvError::Disconnected) => {
-                    break;
-                }
-            }
-            thread::sleep(Duration::from_millis(70));
-            pb2.inc(1);
-        }
-
-        // pb2.println(format!("[+] finished {}", cmd_fmt));
-        // pb2.reset(); // if clearing is needed
-        pb2.finish_with_message(format!("Competed {}", &cmd_fmt));
-    });
+    pb.enable_steady_tick(75);
 
     let output = cmd_runner.get_output(&cmd);
     let out = output.expect("output");
@@ -78,13 +50,15 @@ fn cmd_view(cmd_runner: SshCmd, pb: ProgressBar, cmd: String) {
 
     pb.println(format!(
         "{}\n{}{}\n",
-        cmd_fmt2,
+        cmd_fmt,
         std_out,
         style(err_msg).red()
     ));
-    tx.send(()).expect("inform spinner");
 
-    spinner_thread.join().unwrap();
+    // pb2.println(format!("[+] finished {}", cmd_fmt));
+    // pb2.reset(); // if clearing is needed
+
+    pb.finish_with_message(format!("Competed {}", &cmd_fmt));
 }
 
 fn main() {
