@@ -12,6 +12,8 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 mod cmd;
 use cmd::SshCmd;
 
+mod ls;
+
 mod spinners;
 
 #[derive(FromArgs, Debug)]
@@ -71,19 +73,18 @@ fn cmd_view(cmd_runner: SshCmd, pb: ProgressBar, cmd: String) {
     let output = cmd_runner.get_output(&cmd);
     let out = output.expect("output");
 
-    if !out.stderr.is_empty() {
-        let err_msg = String::from_utf8_lossy(&out.stderr);
-        pb.println(format!("Error: {}", style(err_msg).red()));
-    }
-
     let std_out = String::from_utf8_lossy(&out.stdout);
+    let err_msg = String::from_utf8_lossy(&out.stderr);
 
+    pb.println(format!(
+        "{}\n{}{}\n",
+        cmd_fmt2,
+        std_out,
+        style(err_msg).red()
+    ));
     tx.send(()).expect("inform spinner");
 
     spinner_thread.join().unwrap();
-
-    pb.println(format!("{}", cmd_fmt2));
-    pb.println(std_out);
 }
 
 fn main() {
@@ -95,16 +96,21 @@ fn main() {
     let options = args.options.unwrap_or_default();
 
     let cmd_runner_a = SshCmd::new(&user, &target, &options);
-    let cmd_runner_b = SshCmd::new(&user, &target, &options);
+    let cmd_runner_b = cmd_runner_a.clone();
+    let cmd_runner_c = cmd_runner_a.clone();
 
     let m = MultiProgress::new();
     let pb1 = m.add(ProgressBar::new(100));
     let pb2 = m.add(ProgressBar::new(100));
+    let pb3 = m.add(ProgressBar::new(100));
 
     let cmd1 = thread::spawn(move || cmd_view(cmd_runner_a, pb1, "ls -l /".into()));
     let cmd2 =
         thread::spawn(move || cmd_view(cmd_runner_b, pb2, format!("ls -l /home/{}", user.clone())));
+    let cmd3 =
+        thread::spawn(move || cmd_view(cmd_runner_c, pb3, "ls -l /boohoo/does/not/exist".into()));
 
     cmd1.join().unwrap();
     cmd2.join().unwrap();
+    cmd3.join().unwrap();
 }
