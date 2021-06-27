@@ -1,5 +1,7 @@
 use std::str;
 
+use chrono::{Datelike, NaiveDate, Utc};
+
 #[derive(Debug, Clone)]
 struct FileMeta {
     directory: bool,
@@ -169,6 +171,51 @@ fn test_mac() {
         dir.iter().filter(|m| m.directory).collect::<Vec<_>>().len(),
         2
     );
+}
+
+fn parse_month(month: &str) -> Option<u32> {
+    let v = match month {
+        "Jan" => 0,
+        "Feb" => 1,
+        "Mar" => 2,
+        "Apr" => 3,
+        "May" => 4,
+        "Jun" => 5,
+        "Jul" => 6,
+        "Aug" => 7,
+        "Sep" => 8,
+        "Oct" => 9,
+        "Nov" => 10,
+        "Dec" => 11,
+        _ => return None,
+    };
+    Some(v + 1)
+}
+
+fn parse_time(month: &str, day: &str, time_year: &str) -> Option<u32> {
+    let has_time = time_year.contains(':');
+
+    let now = Utc::now();
+
+    let ts = if has_time {
+        let day = day.parse().ok()?;
+        let month = parse_month(month)?;
+        let mut time = time_year.split(':').filter_map(|t| t.parse().ok());
+        NaiveDate::from_ymd(now.year(), month, day).and_hms(time.next()?, time.next()?, 0)
+    } else {
+        let day = day.parse().ok()?;
+        let month = parse_month(month)?;
+        let year = time_year.parse().ok()?;
+
+        NaiveDate::from_ymd(year, month, day).and_hms(0, 0, 0)
+    };
+
+    Some(ts.timestamp() as u32)
+}
+#[test]
+fn test_time_parsing() {
+    assert!(parse_time("Jun", "26", "19:08").is_some());
+    assert!(parse_time("Jul", "31", "2019").is_some());
 }
 
 #[test]

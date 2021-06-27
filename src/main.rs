@@ -1,7 +1,7 @@
 use argh::FromArgs;
 use std::{path::PathBuf, thread};
 
-use indicatif::{MultiProgress, ProgressBar};
+use indicatif::MultiProgress;
 
 mod cmd;
 use cmd::SshCmd;

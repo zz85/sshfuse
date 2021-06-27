@@ -8,6 +8,8 @@ edition = "2018"
 
 [dependencies]
 argh = "0.1.4"
-console = "*"
+console = "0.14.1"
+chrono = "0.4.19"
+fuse_mt = "0.5.1"
 indicatif = { git = "https://github.com/mitsuhiko/indicatif", branch = "main" }
 rand = "0.8.4"
