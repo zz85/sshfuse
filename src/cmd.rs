@@ -8,37 +8,30 @@ pub struct SshCmd {
     user: String,
     target: String,
     options: String,
-    cmd: String,
 }
 
 impl SshCmd {
-    pub fn new(user: &str, target: &str, options: &str, cmd: &str) -> Self {
+    pub fn new(user: &str, target: &str, options: &str) -> Self {
         let user = user.into();
         let target = target.into();
         let options = options.into();
-        let cmd = cmd.into();
 
         Self {
             user,
             target,
             options,
-            cmd,
         }
     }
 
-    pub fn get_cmd(&self) -> String {
-        return self.cmd.clone();
-    }
-
-    fn get_full_cmd(&self) -> String {
+    fn get_full_cmd(&self, cmd: &str) -> String {
         format!(
             "ssh {} {}@{} -- {}",
-            self.options, self.user, self.target, self.cmd
+            self.options, self.user, self.target, cmd
         )
     }
 
-    pub fn get_output(&self) -> Result<Output, std::io::Error> {
-        let raw_cmd = self.get_full_cmd();
+    pub fn get_output(&self, cmd: &str) -> Result<Output, std::io::Error> {
+        let raw_cmd = self.get_full_cmd(cmd);
         let mut parts = raw_cmd.split_whitespace();
         let cmd = parts
             .next()
