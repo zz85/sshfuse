@@ -32,3 +32,8 @@ sudo yum install fuse
 ```
 sshfuse --user sshuser --target 123.123.123.123
 ```
+### Supported use cases
+
+- Read-only
+- listing and navigating directories (`cd` and `ls` commands)
+- syscalls (`getattr`, `readdir`, `opendir`)

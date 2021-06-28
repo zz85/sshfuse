@@ -2,22 +2,23 @@ use std::str;
 
 use chrono::{Datelike, NaiveDate, Utc};
 
-#[derive(Debug, Clone)]
-struct FileMeta {
-    directory: bool,
-    permissions: String,
-    perms: u16,
-    links: u16,
-    owner_name: String,
-    owner_group: String,
-    file_size: usize,
-    month: String,
-    date: String,
-    time_year: String,
-    name: String,
+#[derive(Debug, Clone, Default)]
+pub struct FileMeta {
+    pub directory: bool,
+    pub permissions: String,
+    pub perms: u16,
+    pub links: u16,
+    pub owner_name: String,
+    pub owner_group: String,
+    pub file_size: usize,
+    pub month: String,
+    pub date: String,
+    pub time_year: String,
+    pub name: String,
+    pub modified_since: u32,
 }
 
-fn parse_long_list(ls: &str) -> Vec<FileMeta> {
+pub fn parse_long_list(ls: &str) -> Vec<FileMeta> {
     let lines = ls.split('\n');
 
     let dir = lines
@@ -64,6 +65,8 @@ fn parse_long_list_line(line: &str) -> Option<FileMeta> {
         rest.to_string()
     };
 
+    let modified_since = parse_time(&month, &date, &time_year)?;
+
     Some(FileMeta {
         directory,
         permissions,
@@ -76,6 +79,7 @@ fn parse_long_list_line(line: &str) -> Option<FileMeta> {
         date,
         time_year,
         name,
+        modified_since,
     })
 }
 
