@@ -56,13 +56,21 @@ struct CachedMeta {
     last_updated: Instant,
 }
 
+struct CachedFile {
+    contents: Vec<u8>,
+    last_updated: Instant,
+}
+
 /// this is a file system back by a cache built on the fly from a remote
 /// listing. the list command is currently on done on the parent and hence
 /// would not have complete data. Ideally this could be merged from stat
 /// information
 struct SshFuseFs {
     runner: SshCmd,
+    /// filesystem metadata cache
     cache: Arc<Mutex<HashMap<String, CachedMeta>>>,
+    /// file cache
+    file_cache: Arc<Mutex<HashMap<String, CachedFile>>>,
 }
 
 impl SshFuseFs {
@@ -70,6 +78,7 @@ impl SshFuseFs {
         SshFuseFs {
             runner,
             cache: Default::default(),
+            file_cache: Default::default(),
         }
     }
 
@@ -432,8 +441,30 @@ impl FilesystemMT for SshFuseFs {
         Err(libc::ENOSYS)
     }
 
-    fn open(&self, _req: RequestInfo, _path: &std::path::Path, _flags: u32) -> ResultOpen {
-        println!("open");
+    fn open(&self, _req: RequestInfo, path: &std::path::Path, _flags: u32) -> ResultOpen {
+        let path = path.to_str().unwrap();
+        println!("open {}", path);
+
+        let mut cache = self.file_cache.lock().unwrap();
+        if cache.contains_key(path) {
+            return Ok((1, 1));
+        }
+
+        // reads the file and poke it into a open file cache
+
+        let cmd = format!("cat {}", path);
+        let output = self.runner.get_output(&cmd).expect("output");
+
+        if output.stderr.len() > 0 {
+            return Err(libc::ENOSYS);
+        }
+
+        let file = CachedFile {
+            contents: output.stdout,
+            last_updated: Instant::now(),
+        };
+
+        cache.insert(path.into(), file);
 
         /* reading a file requires
         open
@@ -441,24 +472,34 @@ impl FilesystemMT for SshFuseFs {
         flush
         release
         */
-
-        // TODO read the file and poke it into a open file cache
-
-        // Err(libc::ENOSYS)
         Ok((1, 1))
     }
 
     fn read(
         &self,
         _req: RequestInfo,
-        _path: &std::path::Path,
+        path: &std::path::Path,
         _fh: u64,
-        _offset: u64,
-        _size: u32,
+        offset: u64,
+        size: u32,
         callback: impl FnOnce(ResultSlice<'_>) -> CallbackResult,
     ) -> CallbackResult {
-        println!("read");
-        callback(Err(libc::ENOSYS))
+        let path = path.to_str().unwrap();
+        println!("read {} offset {} size {}", path, offset, size);
+
+        let file_cache = self.file_cache.lock().unwrap();
+        let file = match file_cache.get(path) {
+            Some(file) => file,
+            _ => {
+                return callback(Err(libc::ENOENT)); // EACCES
+            }
+        };
+
+        let contents = &file.contents;
+        let slice =
+            &contents[offset as usize..(offset as usize + size as usize).min(contents.len())];
+
+        callback(Ok(slice))
     }
 
     fn write(

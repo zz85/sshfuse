@@ -37,3 +37,4 @@ sshfuse --user sshuser --target 123.123.123.123
 - Read-only
 - listing and navigating directories (`cd` and `ls` commands)
 - syscalls (`getattr`, `readdir`, `opendir`)
+- read (`cat`, `less` commands)
