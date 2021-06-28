@@ -1,8 +1,9 @@
+use crate::display::{cmd_view, get_progress_bar};
 use crate::ls::parse_long_list;
 use crate::{cmd::SshCmd, ls::FileMeta};
 use fuse_mt::*;
+use indicatif::MultiProgress;
 use libc;
-use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -12,6 +13,7 @@ use std::time::Duration;
 use std::time::SystemTime;
 use std::{collections::HashMap, path::PathBuf};
 use std::{ffi::OsStr, time::Instant};
+use std::{ffi::OsString, thread::spawn};
 
 const TTL: Duration = Duration::from_secs(60);
 
@@ -71,6 +73,8 @@ struct SshFuseFs {
     cache: Arc<Mutex<HashMap<String, CachedMeta>>>,
     /// file cache
     file_cache: Arc<Mutex<HashMap<String, CachedFile>>>,
+
+    views: MultiProgress,
 }
 
 impl SshFuseFs {
@@ -79,9 +83,11 @@ impl SshFuseFs {
             runner,
             cache: Default::default(),
             file_cache: Default::default(),
+            views: MultiProgress::new(),
         }
     }
 
+    /// based on a key path, check the cache, otherwise fetch it
     fn check_and_update(&self, path_str: &str) {
         let mut buf = PathBuf::from(path_str);
         buf.pop();
@@ -109,16 +115,26 @@ impl SshFuseFs {
     fn fetch_path(&self, path: &str) -> Option<Vec<FileMeta>> {
         // TODO integrate the spinner views
         let cmd = format!("ls -l {}", path);
-        let output = self.runner.get_output(&cmd).expect("output");
+
+        let pb = get_progress_bar(&self.views);
+        let pb2 = pb.clone();
+        let output = cmd_view(&self.runner, pb, cmd);
+
+        // let output = self.runner.get_output(&cmd).expect("output");
 
         if output.stderr.len() > 0 {
             return None;
         }
         let str = &output.stdout;
         let stdout_utf8 = str::from_utf8(&str).unwrap();
-        println!("Out: {}", stdout_utf8);
+        // println!("Out: {}", stdout_utf8);
 
         let dir = parse_long_list(stdout_utf8);
+
+        spawn(move || {
+            std::thread::sleep(Duration::from_secs(2));
+            pb2.finish_and_clear();
+        });
 
         Some(dir)
     }
@@ -246,21 +262,24 @@ impl SshFuseFs {
 
         self.get_dir_list_from_cache(path)
     }
+
+    /// use this for tracking or logging syscalls
+    fn track(&self, func: &str) {}
 }
 
 impl FilesystemMT for SshFuseFs {
     fn init(&self, _req: RequestInfo) -> ResultEmpty {
-        println!("init {:?}", _req);
+        self.track("init");
         Ok(())
     }
 
     fn destroy(&self, _req: RequestInfo) {
-        println!("destroy");
+        self.track("destroy");
         // Nothing.
     }
 
     fn getattr(&self, _req: RequestInfo, path: &std::path::Path, _fh: Option<u64>) -> ResultEntry {
-        // println!("getattr: {:?}", path);
+        self.track("getattr");
 
         let path_str = path.to_str().unwrap();
         self.check_and_update(path_str);
@@ -302,7 +321,7 @@ impl FilesystemMT for SshFuseFs {
             nlink: 1,
             uid: 1,
             gid: 1,
-            rdev: 3,
+            rdev: 0,
             flags: 0,
         };
 
@@ -316,7 +335,7 @@ impl FilesystemMT for SshFuseFs {
         _fh: Option<u64>,
         _mode: u32,
     ) -> ResultEmpty {
-        println!("chmod");
+        self.track("chmod");
         Err(libc::ENOSYS)
     }
 
@@ -328,7 +347,7 @@ impl FilesystemMT for SshFuseFs {
         _uid: Option<u32>,
         _gid: Option<u32>,
     ) -> ResultEmpty {
-        println!("chown");
+        self.track("chown");
         Err(libc::ENOSYS)
     }
 
@@ -339,7 +358,7 @@ impl FilesystemMT for SshFuseFs {
         _fh: Option<u64>,
         _size: u64,
     ) -> ResultEmpty {
-        println!("truncate");
+        self.track("truncate");
         Err(libc::ENOSYS)
     }
 
@@ -351,7 +370,7 @@ impl FilesystemMT for SshFuseFs {
         _atime: Option<std::time::SystemTime>,
         _mtime: Option<std::time::SystemTime>,
     ) -> ResultEmpty {
-        println!("utimens");
+        self.track("utimens");
         Err(libc::ENOSYS)
     }
 
@@ -365,12 +384,12 @@ impl FilesystemMT for SshFuseFs {
         _bkuptime: Option<std::time::SystemTime>,
         _flags: Option<u32>,
     ) -> ResultEmpty {
-        println!("utimens");
+        self.track("utimens");
         Err(libc::ENOSYS)
     }
 
     fn readlink(&self, _req: RequestInfo, _path: &std::path::Path) -> ResultData {
-        println!("readlink");
+        self.track("readlink");
         Err(libc::ENOSYS)
     }
 
@@ -382,7 +401,7 @@ impl FilesystemMT for SshFuseFs {
         _mode: u32,
         _rdev: u32,
     ) -> ResultEntry {
-        println!("mknod");
+        self.track("mknod");
         Err(libc::ENOSYS)
     }
 
@@ -393,17 +412,17 @@ impl FilesystemMT for SshFuseFs {
         _name: &OsStr,
         _mode: u32,
     ) -> ResultEntry {
-        println!("mkdir");
+        self.track("mkdir");
         Err(libc::ENOSYS)
     }
 
     fn unlink(&self, _req: RequestInfo, _parent: &std::path::Path, _name: &OsStr) -> ResultEmpty {
-        println!("unlink");
+        self.track("unlink");
         Err(libc::ENOSYS)
     }
 
     fn rmdir(&self, _req: RequestInfo, _parent: &std::path::Path, _name: &OsStr) -> ResultEmpty {
-        println!("rmdir");
+        self.track("rmdir");
         Err(libc::ENOSYS)
     }
 
@@ -414,7 +433,7 @@ impl FilesystemMT for SshFuseFs {
         _name: &OsStr,
         _target: &std::path::Path,
     ) -> ResultEntry {
-        println!("symlink");
+        self.track("symlink");
         Err(libc::ENOSYS)
     }
 
@@ -426,7 +445,7 @@ impl FilesystemMT for SshFuseFs {
         _newparent: &std::path::Path,
         _newname: &OsStr,
     ) -> ResultEmpty {
-        println!("rename");
+        self.track("rename");
         Err(libc::ENOSYS)
     }
 
@@ -437,13 +456,13 @@ impl FilesystemMT for SshFuseFs {
         _newparent: &std::path::Path,
         _newname: &OsStr,
     ) -> ResultEntry {
-        println!("link");
+        self.track("link");
         Err(libc::ENOSYS)
     }
 
     fn open(&self, _req: RequestInfo, path: &std::path::Path, _flags: u32) -> ResultOpen {
+        self.track("open");
         let path = path.to_str().unwrap();
-        println!("open {}", path);
 
         let mut cache = self.file_cache.lock().unwrap();
         if cache.contains_key(path) {
@@ -451,7 +470,6 @@ impl FilesystemMT for SshFuseFs {
         }
 
         // reads the file and poke it into a open file cache
-
         let cmd = format!("cat {}", path);
         let output = self.runner.get_output(&cmd).expect("output");
 
@@ -484,8 +502,9 @@ impl FilesystemMT for SshFuseFs {
         size: u32,
         callback: impl FnOnce(ResultSlice<'_>) -> CallbackResult,
     ) -> CallbackResult {
+        self.track("read");
         let path = path.to_str().unwrap();
-        println!("read {} offset {} size {}", path, offset, size);
+        // println!("read {} offset {} size {}", path, offset, size);
 
         let file_cache = self.file_cache.lock().unwrap();
         let file = match file_cache.get(path) {
@@ -511,7 +530,7 @@ impl FilesystemMT for SshFuseFs {
         _data: Vec<u8>,
         _flags: u32,
     ) -> ResultWrite {
-        println!("write");
+        self.track("write");
         Err(libc::ENOSYS)
     }
 
@@ -522,7 +541,7 @@ impl FilesystemMT for SshFuseFs {
         _fh: u64,
         _lock_owner: u64,
     ) -> ResultEmpty {
-        println!("flush");
+        self.track("flush");
         Err(libc::ENOSYS)
     }
 
@@ -535,7 +554,7 @@ impl FilesystemMT for SshFuseFs {
         _lock_owner: u64,
         _flush: bool,
     ) -> ResultEmpty {
-        println!("release");
+        self.track("release");
         Err(libc::ENOSYS)
     }
 
@@ -546,12 +565,12 @@ impl FilesystemMT for SshFuseFs {
         _fh: u64,
         _datasync: bool,
     ) -> ResultEmpty {
-        println!("fsync");
+        self.track("fsync");
         Err(libc::ENOSYS)
     }
 
     fn opendir(&self, _req: RequestInfo, path: &std::path::Path, _flags: u32) -> ResultOpen {
-        println!("opendir {:?}", path);
+        self.track("opendir");
 
         let path_str = path.to_str().unwrap();
         self.check_and_update(path_str);
@@ -567,7 +586,7 @@ impl FilesystemMT for SshFuseFs {
     }
 
     fn readdir(&self, _req: RequestInfo, path: &std::path::Path, _fh: u64) -> ResultReaddir {
-        // println!("readdir: {:?} {:?} {:?}", _req, path, _fh);
+        self.track("readdir");
         let entries = self.get_entries(path);
         Ok(entries)
     }
@@ -579,7 +598,7 @@ impl FilesystemMT for SshFuseFs {
         _fh: u64,
         _flags: u32,
     ) -> ResultEmpty {
-        println!("releasedir");
+        self.track("releasedir");
         Err(libc::ENOSYS)
     }
 
@@ -590,12 +609,12 @@ impl FilesystemMT for SshFuseFs {
         _fh: u64,
         _datasync: bool,
     ) -> ResultEmpty {
-        println!("fsyncdir");
+        self.track("fsyncdir");
         Err(libc::ENOSYS)
     }
 
     fn statfs(&self, _req: RequestInfo, _path: &std::path::Path) -> ResultStatfs {
-        // println!("statfs");
+        self.track("fsyncdir");
         // Err(libc::ENOSYS)
 
         Ok(Statfs {
@@ -619,7 +638,7 @@ impl FilesystemMT for SshFuseFs {
         _flags: u32,
         _position: u32,
     ) -> ResultEmpty {
-        println!("setxattr");
+        self.track("setxattr");
         Err(libc::ENOSYS)
     }
 
@@ -630,13 +649,13 @@ impl FilesystemMT for SshFuseFs {
         _name: &OsStr,
         _size: u32,
     ) -> ResultXattr {
-        println!("getxattr");
+        self.track("getxattr");
 
         Err(libc::ENOSYS)
     }
 
     fn listxattr(&self, _req: RequestInfo, _path: &std::path::Path, _size: u32) -> ResultXattr {
-        println!("listxattr");
+        self.track("listxattr");
         Err(libc::ENOSYS)
     }
 
@@ -646,12 +665,12 @@ impl FilesystemMT for SshFuseFs {
         _path: &std::path::Path,
         _name: &OsStr,
     ) -> ResultEmpty {
-        println!("removexattr");
+        self.track("removexattr");
         Err(libc::ENOSYS)
     }
 
     fn access(&self, _req: RequestInfo, _path: &std::path::Path, _mask: u32) -> ResultEmpty {
-        println!("access");
+        self.track("access");
         Err(libc::ENOSYS)
     }
 
@@ -663,17 +682,17 @@ impl FilesystemMT for SshFuseFs {
         _mode: u32,
         _flags: u32,
     ) -> ResultCreate {
-        println!("create");
+        self.track("create");
         Err(libc::ENOSYS)
     }
 
     fn setvolname(&self, _req: RequestInfo, _name: &OsStr) -> ResultEmpty {
-        println!("setvolname");
+        self.track("setvolname");
         Err(libc::ENOSYS)
     }
 
     fn getxtimes(&self, _req: RequestInfo, _path: &std::path::Path) -> ResultXTimes {
-        println!("getxtimes");
+        self.track("getxtimes");
         Err(libc::ENOSYS)
     }
 }
