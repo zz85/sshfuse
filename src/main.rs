@@ -1,5 +1,5 @@
 use argh::FromArgs;
-use std::{path::PathBuf};
+use std::path::PathBuf;
 
 mod cmd;
 use cmd::SshCmd;

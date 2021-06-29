@@ -2,9 +2,8 @@ use crate::display::{cmd_view, get_progress_bar};
 use crate::ls::parse_long_list;
 use crate::{cmd::SshCmd, ls::FileMeta};
 use fuse_mt::*;
-use indicatif::MultiProgress;
+use indicatif::{MultiProgress, ProgressBar};
 use libc;
-use std::fs;
 use std::path::Path;
 use std::process::Command;
 use std::str;
@@ -14,6 +13,10 @@ use std::time::SystemTime;
 use std::{collections::HashMap, path::PathBuf};
 use std::{ffi::OsStr, time::Instant};
 use std::{ffi::OsString, thread::spawn};
+use std::{
+    fs,
+    sync::atomic::{AtomicU32, Ordering},
+};
 
 const TTL: Duration = Duration::from_secs(60);
 
@@ -75,15 +78,23 @@ struct SshFuseFs {
     file_cache: Arc<Mutex<HashMap<String, CachedFile>>>,
 
     views: MultiProgress,
+    trace_bar: ProgressBar,
+
+    counter: AtomicU32,
 }
 
 impl SshFuseFs {
     fn new(runner: SshCmd) -> Self {
+        let views = MultiProgress::new();
+        let trace_bar = get_progress_bar(&views);
+
         SshFuseFs {
             runner,
             cache: Default::default(),
             file_cache: Default::default(),
-            views: MultiProgress::new(),
+            views,
+            trace_bar,
+            counter: Default::default(),
         }
     }
 
@@ -132,7 +143,7 @@ impl SshFuseFs {
         let dir = parse_long_list(stdout_utf8);
 
         spawn(move || {
-            std::thread::sleep(Duration::from_secs(2));
+            std::thread::sleep(Duration::from_secs(3));
             pb2.finish_and_clear();
         });
 
@@ -264,7 +275,15 @@ impl SshFuseFs {
     }
 
     /// use this for tracking or logging syscalls
-    fn track(&self, func: &str) {}
+    fn track(&self, func: &str) {
+        let count = self.counter.load(Ordering::Relaxed);
+        if count % 10 == 0 {
+            self.trace_bar
+                .set_message(format!("syscalls {}: {}", count, func));
+        }
+
+        self.counter.store(count + 1, Ordering::Relaxed);
+    }
 }
 
 impl FilesystemMT for SshFuseFs {
