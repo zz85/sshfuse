@@ -1,9 +1,12 @@
-use crate::display::{cmd_view, get_progress_bar};
-use crate::ls::parse_long_list;
-use crate::{cmd::SshCmd, ls::FileMeta};
+use crate::ls::FileMeta;
+use crate::{
+    cmd::CmdRunner,
+    display::{cmd_view, get_progress_bar},
+};
 use fuse_mt::*;
 use indicatif::{MultiProgress, ProgressBar};
 use libc;
+use std::ffi::OsString;
 use std::path::Path;
 use std::process::Command;
 use std::str;
@@ -12,7 +15,6 @@ use std::time::Duration;
 use std::time::SystemTime;
 use std::{collections::HashMap, path::PathBuf};
 use std::{ffi::OsStr, time::Instant};
-use std::{ffi::OsString, thread::spawn};
 use std::{
     fs,
     sync::atomic::{AtomicU32, Ordering},
@@ -21,7 +23,7 @@ use std::{
 const TTL: Duration = Duration::from_secs(60);
 
 /// helper to mount a path
-pub fn mount(runner: SshCmd) {
+pub fn mount(runner: impl CmdRunner + 'static) {
     let fuse_args: Vec<&OsStr> = vec![
         &OsStr::new("-o"),
         &OsStr::new("auto_unmount"),
@@ -61,6 +63,20 @@ struct CachedMeta {
     last_updated: Instant,
 }
 
+impl Default for CachedMeta {
+    fn default() -> Self {
+        Self {
+            file_meta: Default::default(),
+            directory: Default::default(),
+            perms: 0o7777,
+            size: Default::default(),
+            children: Default::default(),
+            updated: Default::default(),
+            last_updated: Instant::now(),
+        }
+    }
+}
+
 struct CachedFile {
     contents: Vec<u8>,
     last_updated: Instant,
@@ -70,8 +86,8 @@ struct CachedFile {
 /// listing. the list command is currently on done on the parent and hence
 /// would not have complete data. Ideally this could be merged from stat
 /// information
-struct SshFuseFs {
-    runner: SshCmd,
+struct SshFuseFs<T> {
+    runner: T,
     /// filesystem metadata cache
     cache: Arc<Mutex<HashMap<String, CachedMeta>>>,
     /// file cache
@@ -83,8 +99,8 @@ struct SshFuseFs {
     counter: AtomicU32,
 }
 
-impl SshFuseFs {
-    fn new(runner: SshCmd) -> Self {
+impl<T: CmdRunner + Sync + Send> SshFuseFs<T> {
+    fn new(runner: T) -> Self {
         let views = MultiProgress::new();
         let trace_bar = get_progress_bar(&views);
 
@@ -98,8 +114,19 @@ impl SshFuseFs {
         }
     }
 
-    /// based on a key path, check the cache, otherwise fetch it
-    fn check_and_update(&self, path_str: &str) {
+    fn get_key(key: &str) -> &str {
+        // keys are stored without trailing slashes
+        let key = if key == "/" { "" } else { key };
+
+        assert!(!key.ends_with("/"));
+
+        key
+    }
+
+    /// based on a key path, check the cache,
+    /// otherwise fetch a file/directory metadata
+    /// used by getattr and opendir
+    fn get_or_update_metadata(&self, path_str: &str) {
         let mut buf = PathBuf::from(path_str);
         buf.pop();
         let parent_path = buf.to_str().unwrap();
@@ -107,11 +134,11 @@ impl SshFuseFs {
         let in_cache = {
             let cache = self.cache.lock().unwrap();
 
-            if cache.contains_key(path_str) {
+            if cache.contains_key(Self::get_key(path_str)) {
                 true
             } else {
                 // if parent's listing is updated, use the cache!
-                match cache.get(parent_path) {
+                match cache.get(Self::get_key(parent_path)) {
                     Some(meta) => meta.updated && meta.last_updated.elapsed() < TTL,
                     _ => false,
                 }
@@ -124,30 +151,32 @@ impl SshFuseFs {
     }
 
     fn fetch_path(&self, path: &str) -> Option<Vec<FileMeta>> {
-        // TODO integrate the spinner views
-        let cmd = format!("ls -l {}", path);
+        return self.runner.fetch_path(path);
 
-        let pb = get_progress_bar(&self.views);
-        let pb2 = pb.clone();
-        let output = cmd_view(&self.runner, pb, cmd);
+        // // TODO integrate the spinner views
+        // let cmd = format!("ls -l {}", path);
 
+        // let pb = get_progress_bar(&self.views);
+        // let pb2 = pb.clone();
+
+        // // let output = cmd_view(&self.runner, pb, cmd);
         // let output = self.runner.get_output(&cmd).expect("output");
 
-        if output.stderr.len() > 0 {
-            return None;
-        }
-        let str = &output.stdout;
-        let stdout_utf8 = str::from_utf8(&str).unwrap();
+        // if output.stderr.len() > 0 {
+        //     // return None;
+        // }
+        // let str = &output.stdout;
+        // let stdout_utf8 = str::from_utf8(&str).unwrap();
         // println!("Out: {}", stdout_utf8);
 
-        let dir = parse_long_list(stdout_utf8);
+        // let dir = parse_long_list(stdout_utf8);
 
-        spawn(move || {
-            std::thread::sleep(Duration::from_secs(3));
-            pb2.finish_and_clear();
-        });
+        // spawn(move || {
+        //     std::thread::sleep(Duration::from_secs(3));
+        //     pb2.finish_and_clear();
+        // });
 
-        Some(dir)
+        // Some(dir)
     }
 
     /// this uses 2 path parameters
@@ -155,6 +184,7 @@ impl SshFuseFs {
     /// path with the forward slash is to force `ls` to list the directory
     /// content and not just the path
     fn update_dir_cache(&self, path: &str, no_trailing_key: &str) {
+        // for root "/", the key is ""
         let no_trailing_key = if path == "/" { "" } else { no_trailing_key };
 
         let meta = match self.fetch_path(path) {
@@ -168,22 +198,11 @@ impl SshFuseFs {
         // populate cache
         let children = meta.iter().map(|m| m.name.to_string()).collect::<Vec<_>>();
 
-        let key = if path == "/" { "/" } else { no_trailing_key };
+        let parent = cache.entry(no_trailing_key.into()).or_default();
 
-        // TODO do not override previous values
-        // update parent info
-        cache.insert(
-            key.into(),
-            CachedMeta {
-                file_meta: None,
-                directory: true,
-                size: 0,
-                perms: (0o7777) as u16,
-                children: Some(children),
-                updated: true,
-                last_updated: Instant::now(),
-            },
-        );
+        parent.updated = true;
+        parent.children = Some(children);
+        parent.directory = true;
 
         // update children
         for m in meta {
@@ -205,7 +224,7 @@ impl SshFuseFs {
         // println!("Cache {:#?}", cache);
     }
 
-    /// attempts to get directory listing from catch, other make a fetch
+    /// attempts to get directory listing from cache, other make a fetch
     /// to populate cache.
     /// this is used by readdir
     fn get_dir_list_from_cache(&self, path: &str) -> Vec<DirectoryEntry> {
@@ -220,11 +239,7 @@ impl SshFuseFs {
         let require_update = {
             let cache = self.cache.lock().unwrap();
 
-            let cached = cache.get(if dir_path == "/" {
-                "/"
-            } else {
-                &no_trailing_key
-            });
+            let cached = cache.get(&no_trailing_key);
             cached.is_none()
                 || !cached.unwrap().updated
                 || cached.unwrap().last_updated.elapsed() > TTL
@@ -239,13 +254,7 @@ impl SshFuseFs {
         let cache = self.cache.lock().unwrap();
 
         // read from cache
-        let cached = cache
-            .get(if dir_path == "/" {
-                "/"
-            } else {
-                &no_trailing_key
-            })
-            .unwrap();
+        let cached = cache.get(&no_trailing_key).unwrap();
 
         if let Some(children) = &cached.children {
             for filename in children {
@@ -275,37 +284,35 @@ impl SshFuseFs {
     }
 
     /// use this for tracking or logging syscalls
-    fn track(&self, func: &str) {
-        let count = self.counter.load(Ordering::Relaxed);
+    fn track(&self, syscall: &str, path: &Path) {
+        let count = self.counter.fetch_add(1, Ordering::Relaxed);
         if count % 10 == 0 {
             self.trace_bar
-                .set_message(format!("syscalls {}: {}", count, func));
+                .println(format!("syscall {}: {} {:?}", count, syscall, path));
         }
-
-        self.counter.store(count + 1, Ordering::Relaxed);
     }
 }
 
-impl FilesystemMT for SshFuseFs {
+impl<T: CmdRunner> FilesystemMT for SshFuseFs<T> {
     fn init(&self, _req: RequestInfo) -> ResultEmpty {
-        self.track("init");
+        self.track("init", &Path::new(""));
         Ok(())
     }
 
     fn destroy(&self, _req: RequestInfo) {
-        self.track("destroy");
+        self.track("destroy", &Path::new(""));
         // Nothing.
     }
 
     fn getattr(&self, _req: RequestInfo, path: &std::path::Path, _fh: Option<u64>) -> ResultEntry {
-        self.track("getattr");
+        self.track("getattr", path);
 
         let path_str = path.to_str().unwrap();
-        self.check_and_update(path_str);
+        self.get_or_update_metadata(path_str);
 
         // TODO refresh as a background thread after x interval
         let cache = self.cache.lock().unwrap();
-        let (kind, perms, size, seconds) = match cache.get(path_str) {
+        let (kind, perms, size, seconds) = match cache.get(Self::get_key(path_str)) {
             Some(meta) => {
                 let kind = if meta.directory {
                     FileType::Directory
@@ -350,65 +357,65 @@ impl FilesystemMT for SshFuseFs {
     fn chmod(
         &self,
         _req: RequestInfo,
-        _path: &std::path::Path,
+        path: &std::path::Path,
         _fh: Option<u64>,
         _mode: u32,
     ) -> ResultEmpty {
-        self.track("chmod");
+        self.track("chmod", path);
         Err(libc::ENOSYS)
     }
 
     fn chown(
         &self,
         _req: RequestInfo,
-        _path: &std::path::Path,
+        path: &std::path::Path,
         _fh: Option<u64>,
         _uid: Option<u32>,
         _gid: Option<u32>,
     ) -> ResultEmpty {
-        self.track("chown");
+        self.track("chown", path);
         Err(libc::ENOSYS)
     }
 
     fn truncate(
         &self,
         _req: RequestInfo,
-        _path: &std::path::Path,
+        path: &std::path::Path,
         _fh: Option<u64>,
         _size: u64,
     ) -> ResultEmpty {
-        self.track("truncate");
+        self.track("truncate", path);
         Err(libc::ENOSYS)
     }
 
     fn utimens(
         &self,
         _req: RequestInfo,
-        _path: &std::path::Path,
+        path: &std::path::Path,
         _fh: Option<u64>,
         _atime: Option<std::time::SystemTime>,
         _mtime: Option<std::time::SystemTime>,
     ) -> ResultEmpty {
-        self.track("utimens");
+        self.track("utimens", path);
         Err(libc::ENOSYS)
     }
 
     fn utimens_macos(
         &self,
         _req: RequestInfo,
-        _path: &std::path::Path,
+        path: &std::path::Path,
         _fh: Option<u64>,
         _crtime: Option<std::time::SystemTime>,
         _chgtime: Option<std::time::SystemTime>,
         _bkuptime: Option<std::time::SystemTime>,
         _flags: Option<u32>,
     ) -> ResultEmpty {
-        self.track("utimens");
+        self.track("utimens", path);
         Err(libc::ENOSYS)
     }
 
-    fn readlink(&self, _req: RequestInfo, _path: &std::path::Path) -> ResultData {
-        self.track("readlink");
+    fn readlink(&self, _req: RequestInfo, path: &std::path::Path) -> ResultData {
+        self.track("readlink", path);
         Err(libc::ENOSYS)
     }
 
@@ -420,7 +427,7 @@ impl FilesystemMT for SshFuseFs {
         _mode: u32,
         _rdev: u32,
     ) -> ResultEntry {
-        self.track("mknod");
+        self.track("mknod", _parent);
         Err(libc::ENOSYS)
     }
 
@@ -431,17 +438,17 @@ impl FilesystemMT for SshFuseFs {
         _name: &OsStr,
         _mode: u32,
     ) -> ResultEntry {
-        self.track("mkdir");
+        self.track("mkdir", _parent);
         Err(libc::ENOSYS)
     }
 
     fn unlink(&self, _req: RequestInfo, _parent: &std::path::Path, _name: &OsStr) -> ResultEmpty {
-        self.track("unlink");
+        self.track("unlink", _parent);
         Err(libc::ENOSYS)
     }
 
     fn rmdir(&self, _req: RequestInfo, _parent: &std::path::Path, _name: &OsStr) -> ResultEmpty {
-        self.track("rmdir");
+        self.track("rmdir", _parent);
         Err(libc::ENOSYS)
     }
 
@@ -452,7 +459,7 @@ impl FilesystemMT for SshFuseFs {
         _name: &OsStr,
         _target: &std::path::Path,
     ) -> ResultEntry {
-        self.track("symlink");
+        self.track("symlink", _parent);
         Err(libc::ENOSYS)
     }
 
@@ -464,33 +471,30 @@ impl FilesystemMT for SshFuseFs {
         _newparent: &std::path::Path,
         _newname: &OsStr,
     ) -> ResultEmpty {
-        self.track("rename");
+        self.track("rename", _parent);
         Err(libc::ENOSYS)
     }
 
     fn link(
         &self,
         _req: RequestInfo,
-        _path: &std::path::Path,
+        path: &std::path::Path,
         _newparent: &std::path::Path,
         _newname: &OsStr,
     ) -> ResultEntry {
-        self.track("link");
+        self.track("link", path);
         Err(libc::ENOSYS)
     }
 
     fn open(&self, _req: RequestInfo, path: &std::path::Path, _flags: u32) -> ResultOpen {
-        self.track("open");
+        self.track("open", path);
         let path = path.to_str().unwrap();
 
         let mut cache = self.file_cache.lock().unwrap();
         if cache.contains_key(path) {
             return Ok((1, 1));
         }
-
-        // reads the file and poke it into a open file cache
-        let cmd = format!("cat {}", path);
-        let output = self.runner.get_output(&cmd).expect("output");
+        let output = self.runner.fetch_file(path);
 
         if output.stderr.len() > 0 {
             return Err(libc::ENOSYS);
@@ -521,7 +525,7 @@ impl FilesystemMT for SshFuseFs {
         size: u32,
         callback: impl FnOnce(ResultSlice<'_>) -> CallbackResult,
     ) -> CallbackResult {
-        self.track("read");
+        self.track("read", path);
         let path = path.to_str().unwrap();
         // println!("read {} offset {} size {}", path, offset, size);
 
@@ -543,69 +547,71 @@ impl FilesystemMT for SshFuseFs {
     fn write(
         &self,
         _req: RequestInfo,
-        _path: &std::path::Path,
+        path: &std::path::Path,
         _fh: u64,
         _offset: u64,
         _data: Vec<u8>,
         _flags: u32,
     ) -> ResultWrite {
-        self.track("write");
+        self.track("write", path);
         Err(libc::ENOSYS)
     }
 
     fn flush(
         &self,
         _req: RequestInfo,
-        _path: &std::path::Path,
+        path: &std::path::Path,
         _fh: u64,
         _lock_owner: u64,
     ) -> ResultEmpty {
-        self.track("flush");
+        self.track("flush", path);
         Err(libc::ENOSYS)
     }
 
     fn release(
         &self,
         _req: RequestInfo,
-        _path: &std::path::Path,
+        path: &std::path::Path,
         _fh: u64,
         _flags: u32,
         _lock_owner: u64,
         _flush: bool,
     ) -> ResultEmpty {
-        self.track("release");
+        self.track("release", path);
         Err(libc::ENOSYS)
     }
 
     fn fsync(
         &self,
         _req: RequestInfo,
-        _path: &std::path::Path,
+        path: &std::path::Path,
         _fh: u64,
         _datasync: bool,
     ) -> ResultEmpty {
-        self.track("fsync");
+        self.track("fsync", path);
         Err(libc::ENOSYS)
     }
 
     fn opendir(&self, _req: RequestInfo, path: &std::path::Path, _flags: u32) -> ResultOpen {
-        self.track("opendir");
+        self.track("opendir", path);
 
         let path_str = path.to_str().unwrap();
-        self.check_and_update(path_str);
+        self.get_or_update_metadata(path_str);
 
         let cache = self.cache.lock().unwrap();
 
-        if cache.contains_key(path_str) {
+        if cache.contains_key(Self::get_key(path_str)) {
             // return okay so cd doesn't fail
             Ok((1, 1))
         } else {
-            Err(libc::ENOSYS)
+            // not a file or directory!
+            Err(libc::ENOENT)
         }
     }
 
+    // we optimistically think the directory should be preload in cache!
     fn readdir(&self, _req: RequestInfo, path: &std::path::Path, _fh: u64) -> ResultReaddir {
-        self.track("readdir");
+        self.track("readdir", path);
         let entries = self.get_entries(path);
         Ok(entries)
     }
@@ -613,28 +619,29 @@ impl FilesystemMT for SshFuseFs {
     fn releasedir(
         &self,
         _req: RequestInfo,
-        _path: &std::path::Path,
+        path: &std::path::Path,
         _fh: u64,
         _flags: u32,
     ) -> ResultEmpty {
-        self.track("releasedir");
+        self.track("releasedir", path);
         Err(libc::ENOSYS)
     }
 
     fn fsyncdir(
         &self,
         _req: RequestInfo,
-        _path: &std::path::Path,
+        path: &std::path::Path,
         _fh: u64,
         _datasync: bool,
     ) -> ResultEmpty {
-        self.track("fsyncdir");
+        self.track("fsyncdir", path);
         Err(libc::ENOSYS)
     }
 
-    fn statfs(&self, _req: RequestInfo, _path: &std::path::Path) -> ResultStatfs {
-        self.track("fsyncdir");
-        // Err(libc::ENOSYS)
+    fn statfs(&self, _req: RequestInfo, path: &std::path::Path) -> ResultStatfs {
+        self.track("fsyncdir", path);
+
+        // we need to return something!
 
         Ok(Statfs {
             blocks: 0 as u64,
@@ -651,45 +658,40 @@ impl FilesystemMT for SshFuseFs {
     fn setxattr(
         &self,
         _req: RequestInfo,
-        _path: &std::path::Path,
+        path: &std::path::Path,
         _name: &OsStr,
         _value: &[u8],
         _flags: u32,
         _position: u32,
     ) -> ResultEmpty {
-        self.track("setxattr");
+        self.track("setxattr", path);
         Err(libc::ENOSYS)
     }
 
     fn getxattr(
         &self,
         _req: RequestInfo,
-        _path: &std::path::Path,
+        path: &std::path::Path,
         _name: &OsStr,
         _size: u32,
     ) -> ResultXattr {
-        self.track("getxattr");
+        self.track("getxattr", path);
 
         Err(libc::ENOSYS)
     }
 
-    fn listxattr(&self, _req: RequestInfo, _path: &std::path::Path, _size: u32) -> ResultXattr {
-        self.track("listxattr");
+    fn listxattr(&self, _req: RequestInfo, path: &std::path::Path, _size: u32) -> ResultXattr {
+        self.track("listxattr", path);
         Err(libc::ENOSYS)
     }
 
-    fn removexattr(
-        &self,
-        _req: RequestInfo,
-        _path: &std::path::Path,
-        _name: &OsStr,
-    ) -> ResultEmpty {
-        self.track("removexattr");
+    fn removexattr(&self, _req: RequestInfo, path: &std::path::Path, _name: &OsStr) -> ResultEmpty {
+        self.track("removexattr", path);
         Err(libc::ENOSYS)
     }
 
-    fn access(&self, _req: RequestInfo, _path: &std::path::Path, _mask: u32) -> ResultEmpty {
-        self.track("access");
+    fn access(&self, _req: RequestInfo, path: &std::path::Path, _mask: u32) -> ResultEmpty {
+        self.track("access", path);
         Err(libc::ENOSYS)
     }
 
@@ -701,17 +703,83 @@ impl FilesystemMT for SshFuseFs {
         _mode: u32,
         _flags: u32,
     ) -> ResultCreate {
-        self.track("create");
+        self.track("create", _parent);
         Err(libc::ENOSYS)
     }
 
     fn setvolname(&self, _req: RequestInfo, _name: &OsStr) -> ResultEmpty {
-        self.track("setvolname");
+        self.track("setvolname", &Path::new(""));
         Err(libc::ENOSYS)
     }
 
-    fn getxtimes(&self, _req: RequestInfo, _path: &std::path::Path) -> ResultXTimes {
-        self.track("getxtimes");
+    fn getxtimes(&self, _req: RequestInfo, path: &std::path::Path) -> ResultXTimes {
+        self.track("getxtimes", path);
         Err(libc::ENOSYS)
     }
+}
+
+#[test]
+fn test_runner() {
+    use crate::ls::parse_long_list;
+    use std::process::Output;
+
+    struct TestRunner {
+        count: AtomicU32,
+    }
+
+    impl CmdRunner for TestRunner {
+        fn fetch_path(&self, path: &str) -> Option<Vec<FileMeta>> {
+            println!("fetch_path {}", path);
+            self.count.fetch_add(1, Ordering::Relaxed);
+            match path {
+                "/" => {
+                    let ls = r"total 128
+                    drwxr-xr-x   2 root root  4096 Mar  3 23:27 bin
+                    drwxr-xr-x   3 root root  4096 Jun 25 06:00 boot
+                    drwxr-xr-x  14 root root  3160 Dec 17  2020 dev
+                    drwxr-xr-x 105 root root  4096 Jun 25 21:26 etc";
+                    Some(parse_long_list(ls))
+                }
+                "/boot/" => {
+                    let ls = r"total 128M
+                    -rw------- 1 root root 3.7M Jul  4  2019 System.map-4.15.0-1044-aws
+                    -rw------- 1 root root 3.7M Nov  7  2019 System.map-4.15.0-1054-aws
+                    -rw------- 1 root root 4.3M May 14 16:08 System.map-5.4.0-1049-aws";
+                    Some(parse_long_list(ls))
+                }
+                _ => None,
+            }
+        }
+
+        fn fetch_file(&self, path: &str) -> Output {
+            todo!();
+        }
+    }
+
+    let runner = TestRunner {
+        count: Default::default(),
+    };
+    let filesystem = SshFuseFs::new(runner);
+
+    assert_eq!(filesystem.cache.lock().unwrap().contains_key(""), false);
+    assert_eq!(filesystem.runner.count.load(Ordering::Relaxed), 0);
+
+    filesystem.get_or_update_metadata("/");
+    assert_eq!(filesystem.cache.lock().unwrap().contains_key(""), true);
+    assert_eq!(filesystem.runner.count.load(Ordering::Relaxed), 1);
+
+    // make sure that it's reading from cache
+    filesystem.get_or_update_metadata("/");
+    assert_eq!(filesystem.runner.count.load(Ordering::Relaxed), 1);
+    // println!("cache: {:#?}", filesystem.cache);
+
+    // still reading from cache but only attrs are needed, could spin
+    // things up in the background
+    filesystem.get_or_update_metadata("/boot");
+    assert_eq!(filesystem.runner.count.load(Ordering::Relaxed), 1);
+
+    assert_eq!(filesystem.get_dir_list_from_cache("/").len(), 4);
+
+    assert_eq!(filesystem.get_dir_list_from_cache("/boot").len(), 3);
+    assert_eq!(filesystem.runner.count.load(Ordering::Relaxed), 2);
 }
