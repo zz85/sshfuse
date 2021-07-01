@@ -34,7 +34,25 @@ sshfuse --user sshuser --target 123.123.123.123
 ```
 ### Supported use cases
 
-- Read-only
+- mount a Read-only filesystem
 - listing and navigating directories (`cd` and `ls` commands)
 - syscalls (`getattr`, `readdir`, `opendir`)
 - read (`cat`, `less` commands)
+
+
+### TODO
+
+Optimizations
+- more optimistic fetching (eg. fetch deeper levels, prefetch partially expired directories)
+- pipeline / reuse pipelines
+- spawn multiple background threads
+- collapse inflight requests
+
+Features
+- take stdin for ssh prompts (eg. passwords etc)
+- multiple ssh target helper
+- gather stats
+
+Fixes
+- invalidate file caching
+- stat files / read symlinks
