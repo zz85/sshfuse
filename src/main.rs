@@ -8,6 +8,8 @@ mod ls;
 mod mount;
 mod spinners;
 
+use display::RunnerWithSpinner;
+
 #[derive(FromArgs, Debug)]
 /// Fuse options
 struct FuseOption {
@@ -26,6 +28,10 @@ struct FuseOption {
     /// mount path
     #[argh(option)]
     pub dir: Option<PathBuf>,
+
+    /// display spinners
+    #[argh(option)]
+    pub spinner: Option<bool>,
 }
 
 fn main() {
@@ -37,6 +43,11 @@ fn main() {
     let options = args.options.unwrap_or_default();
 
     let cmd_runner = SshCmd::new(&user, &target, &options);
+    let spinner_runner = RunnerWithSpinner::new(&user, &target, &options);
 
-    mount::mount(cmd_runner);
+    if args.spinner.unwrap_or(true) {
+        mount::mount(spinner_runner)
+    } else {
+        mount::mount(cmd_runner)
+    }
 }

@@ -1,9 +1,54 @@
 use std::process::Output;
 
-use crate::cmd::SshCmd;
 use crate::spinners;
+use crate::{
+    cmd::{CmdRunner, SshCmd},
+    ls::FileMeta,
+};
 use console::style;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+
+pub struct RunnerWithSpinner {
+    cmd: SshCmd,
+    views: MultiProgress,
+}
+
+impl RunnerWithSpinner {
+    pub fn new(user: &str, target: &str, options: &str) -> Self {
+        let views = MultiProgress::new();
+        // let trace_bar = get_progress_bar(&views);
+
+        Self {
+            views,
+            cmd: SshCmd::new(&user, &target, &options),
+        }
+    }
+}
+
+impl CmdRunner for RunnerWithSpinner {
+    // use overly generalized view for now
+    fn fetch_path(&self, path: &str) -> Option<Vec<FileMeta>> {
+        let pb = get_progress_bar(&self.views);
+        let cmd_fmt = style(path).dim().bold();
+        pb.set_message(format!("Fetching path {}...", cmd_fmt));
+        pb.enable_steady_tick(75);
+
+        let o = self.cmd.fetch_path(path);
+        pb.finish_with_message(format!("Done: {}", &cmd_fmt));
+        o
+    }
+
+    fn fetch_file(&self, path: &str) -> Output {
+        let pb = get_progress_bar(&self.views);
+        let cmd_fmt = style(path).dim().bold();
+        pb.set_message(format!("Fetching file {}...", cmd_fmt));
+        pb.enable_steady_tick(75);
+
+        let o = self.cmd.fetch_file(path);
+        pb.finish_with_message(format!("Done: {}", &cmd_fmt));
+        o
+    }
+}
 
 pub fn get_progress_bar(m: &MultiProgress) -> ProgressBar {
     let pb = m.add(ProgressBar::new(100));

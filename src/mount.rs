@@ -1,10 +1,6 @@
+use crate::cmd::CmdRunner;
 use crate::ls::FileMeta;
-use crate::{
-    cmd::CmdRunner,
-    display::{cmd_view, get_progress_bar},
-};
 use fuse_mt::*;
-use indicatif::{MultiProgress, ProgressBar};
 use libc;
 use std::ffi::OsString;
 use std::path::Path;
@@ -93,23 +89,19 @@ struct SshFuseFs<T> {
     /// file cache
     file_cache: Arc<Mutex<HashMap<String, CachedFile>>>,
 
-    views: MultiProgress,
-    trace_bar: ProgressBar,
-
     counter: AtomicU32,
 }
 
 impl<T: CmdRunner + Sync + Send> SshFuseFs<T> {
     fn new(runner: T) -> Self {
-        let views = MultiProgress::new();
-        let trace_bar = get_progress_bar(&views);
+        // let trace_bar = get_progress_bar(&views);
 
         SshFuseFs {
             runner,
             cache: Default::default(),
             file_cache: Default::default(),
-            views,
-            trace_bar,
+
+            // trace_bar,
             counter: Default::default(),
         }
     }
@@ -151,32 +143,7 @@ impl<T: CmdRunner + Sync + Send> SshFuseFs<T> {
     }
 
     fn fetch_path(&self, path: &str) -> Option<Vec<FileMeta>> {
-        return self.runner.fetch_path(path);
-
-        // // TODO integrate the spinner views
-        // let cmd = format!("ls -l {}", path);
-
-        // let pb = get_progress_bar(&self.views);
-        // let pb2 = pb.clone();
-
-        // // let output = cmd_view(&self.runner, pb, cmd);
-        // let output = self.runner.get_output(&cmd).expect("output");
-
-        // if output.stderr.len() > 0 {
-        //     // return None;
-        // }
-        // let str = &output.stdout;
-        // let stdout_utf8 = str::from_utf8(&str).unwrap();
-        // println!("Out: {}", stdout_utf8);
-
-        // let dir = parse_long_list(stdout_utf8);
-
-        // spawn(move || {
-        //     std::thread::sleep(Duration::from_secs(3));
-        //     pb2.finish_and_clear();
-        // });
-
-        // Some(dir)
+        self.runner.fetch_path(path)
     }
 
     /// this uses 2 path parameters
@@ -287,8 +254,8 @@ impl<T: CmdRunner + Sync + Send> SshFuseFs<T> {
     fn track(&self, syscall: &str, path: &Path) {
         let count = self.counter.fetch_add(1, Ordering::Relaxed);
         if count % 10 == 0 {
-            self.trace_bar
-                .println(format!("syscall {}: {} {:?}", count, syscall, path));
+            // self.trace_bar
+            println!("{}", format!("syscall {}: {} {:?}", count, syscall, path));
         }
     }
 }
